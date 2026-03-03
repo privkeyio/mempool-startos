@@ -1,8 +1,8 @@
 id: mempooldotguide
 title: Mempool
-version: 3.3.0.3
+version: 3.3.0.5
 release-notes: |
-  * Fix bitnodes API
+  * Update the upstream code
 license: AGPL
 wrapper-repo: "https://github.com/Retropex/mempool-startos"
 upstream-repo: "https://github.com/Retropex/mempool"
@@ -62,7 +62,7 @@ config:
     type: script
 dependencies:
   bitcoind:
-    version: ">=0.21.1.2 <29.0.0"
+    version: ">=0.21.1.2 <31.0.0"
     requirement:
       type: "required"
     description: Used to subscribe to new block events from a full archival node
@@ -71,14 +71,20 @@ dependencies:
         type: script
       auto-configure:
         type: script
+  fulcrum:
+    version: '>=1.11.0 <3.0.0'
+    requirement:
+      type: 'opt-in'
+      how: Set Indexer to Fulcrum in the config
+    description: Used for fast scan of addresses and indexing for deep wallets.
   electrs:
     version: ">=0.9.6 <0.12.0"
     requirement:
-      type: "opt-out"
-      how: Set Enable Electrs to Disabled in the config
-    description: Used to provide an index for address lookups
+      type: "opt-in"
+      how: Set Indexer to Electrs in the config
+    description: A more stable, but less performant indexer.
   lnd:
-    version: ">=0.14.3 <0.20.0"
+    version: ">=0.14.3 <0.21.0"
     description: Used to communicate with the Lightning Network.
     requirement:
       type: "opt-in"
@@ -166,8 +172,10 @@ migrations:
   from:
     "<2.3.1.4":
       type: script
+      args: ["from"]
     ">=2.3.1.4 <2.5.0":
       type: script
+      args: ["from"]
     ">=2.5.0 <=3.0.0.3":
       type: docker
       image: main
@@ -175,16 +183,19 @@ migrations:
       entrypoint: /usr/local/bin/migrations/gt_2_5_0_lt_3_0_0_2.sh
       args: ["from"]
       io-format: json
-      mounts: 
+      mounts:
         main: /root
       inject: false
     ">3.0.0.3":
       type: script
+      args: ["from"]
   to:
     "<2.3.1.4":
       type: script
+      args: ["to"]
     ">=2.3.1.4 <2.5.0":
       type: script
+      args: ["to"]
     ">=2.5.0 <=3.0.0.3":
       type: docker
       image: main
@@ -192,8 +203,9 @@ migrations:
       entrypoint: /usr/local/bin/migrations/gt_2_5_0_lt_3_0_0_2.sh
       args: ["to"]
       io-format: json
-      mounts: 
+      mounts:
         main: /root
       inject: false
     ">3.0.0.3":
       type: script
+      args: ["to"]

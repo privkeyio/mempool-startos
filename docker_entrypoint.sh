@@ -1,8 +1,8 @@
 #!/bin/bash
 set -ea
 
-_term() { 
-  echo "Caught SIGTERM signal!" 
+_term() {
+  echo "Caught SIGTERM signal!"
   kill -TERM "$backend_process" 2>/dev/null
   kill -TERM "$db_process" 2>/dev/null
   kill -TERM "$frontend_process" 2>/dev/null
@@ -10,7 +10,9 @@ _term() {
 
 # FRONTEND SETUP
 
-LIGHTNING_DETECTED_PORT=9735
+if [ "$(yq e ".lightning.type" /root/start9/config.yaml)" != "none" ]; then
+  LIGHTNING_DETECTED_PORT=9735
+fi
 __MEMPOOL_BACKEND_MAINNET_HTTP_HOST__=${BACKEND_MAINNET_HTTP_HOST:=127.0.0.1}
 __MEMPOOL_BACKEND_MAINNET_HTTP_PORT__=${BACKEND_MAINNET_HTTP_PORT:=8999}
 __MEMPOOL_FRONTEND_HTTP_PORT__=${FRONTEND_HTTP_PORT:=8080}
@@ -68,9 +70,15 @@ elif [ "$(yq e ".lightning.type" /root/start9/config.yaml)" = "cln" ]; then
 	echo "Running on Core Lightning..."
 fi
 
-if [ "$(yq e ".enable-electrs" /root/start9/config.yaml)" = "true" ]; then
+# Allow user to choose between Electrs, Fulcrum as Indexer
+if [ "$(yq e ".indexer.type" /root/start9/config.yaml)" = "electrs" ]; then
 	sed -i 's/ELECTRUM_HOST:=127.0.0.1/ELECTRUM_HOST:=electrs.embassy/' start.sh
 	sed -i 's/ELECTRUM_PORT:=50002/ELECTRUM_PORT:=50001/' start.sh
+	echo "Running with Electrs..."
+elif [ "$(yq e ".indexer.type" /root/start9/config.yaml)" = "fulcrum" ]; then
+	sed -i 's/ELECTRUM_HOST:=127.0.0.1/ELECTRUM_HOST:=fulcrum.embassy/' start.sh
+	sed -i 's/ELECTRUM_PORT:=50002/ELECTRUM_PORT:=50001/' start.sh
+	echo "Running with Fulcrum..."
 else
 	# configure mempool to use just a bitcoind backend
 	sed -i '/^node \/backend\/dist\/index.js/i jq \x27.MEMPOOL.BACKEND="none"\x27 \/backend\/mempool-config.json > \/backend\/mempool-config.json.tmp && mv \/backend\/mempool-config.json.tmp \/backend\/mempool-config.json' start.sh
@@ -78,25 +86,27 @@ else
 fi
 
 # DATABASE SETUP
-if [ -d "/run/mysqld" ]; then
+MYSQL_DATADIR="/var/lib/mysql"
+UPGRADE_MARKER="$MYSQL_DATADIR/.upgrade_done"
+MYSQL_DIR="/var/run/mysqld"
+MYSQL_SOCKET="$MYSQL_DIR/mysqld.sock"
+
+if [ -d "$MYSQL_DIR" ]; then
 	echo "[i] mysqld already present, skipping creation"
-	chown -R mysql:mysql /run/mysqld
+	chown -R mysql:mysql $MYSQL_DIR
 else
 	echo "[i] mysqld not found, creating...."
-	mkdir -p /run/mysqld
-	chown -R mysql:mysql /run/mysqld
+	mkdir -p $MYSQL_DIR
+	chown -R mysql:mysql $MYSQL_DIR
 fi
 
-if [ -d /var/lib/mysql/mysql ]; then
-	echo "[i] MySQL directory already present, skipping creation"
-	chown -R mysql:mysql /var/lib/mysql
-else
-	echo "[i] MySQL data directory not found, creating initial DBs"
-
-    mkdir -p /var/lib/mysql
-	chown -R mysql:mysql /var/lib/mysql
-
-	mysql_install_db --user=mysql --ldata=/var/lib/mysql > /dev/null
+# Initialize the database if not already initialized
+if [ ! -d "$MYSQL_DATADIR/mysql" ]; then
+	echo "Initializing MariaDB data directory..."
+	mariadb-install-db --user=mysql --datadir="$MYSQL_DATADIR" > /dev/null
+	chown -R mysql:mysql "$MYSQL_DATADIR"
+	chmod -R 755 "$MYSQL_DATADIR"
+	touch "$UPGRADE_MARKER"  # Skip upgrade on initial boot
 
 	if [ "$MYSQL_ROOT_PASSWORD" = "" ]; then
 		MYSQL_ROOT_PASSWORD=`pwgen 16 1`
@@ -136,7 +146,7 @@ EOF
 	    fi
 	fi
 
-	/usr/sbin/mysqld --user=mysql --bootstrap --verbose=0 --skip-name-resolve --skip-networking=0 < $tfile
+	/usr/sbin/mysqld --user=mysql --datadir="$MYSQL_DATADIR" --bootstrap --verbose=0 --skip-name-resolve --skip-networking=0 < $tfile
 
 	rm -f $tfile
 
@@ -154,7 +164,36 @@ EOF
 	echo
 fi
 
-/usr/bin/mysqld_safe --user=mysql --datadir='/var/lib/mysql' &
+chown -R mysql:mysql "$MYSQL_DATADIR"
+chmod -R 755 "$MYSQL_DATADIR"
+
+# Run mysql_upgrade once
+if [ -d "$MYSQL_DATADIR/mysql" ] && [ ! -f "$UPGRADE_MARKER" ]; then
+	echo "Starting MariaDB for upgrade..."
+	mariadbd --user=mysql --datadir="$MYSQL_DATADIR" --skip-grant-tables &
+	# Wait for server to start up
+	echo "Waiting for MariaDB to start..."
+	until mysqladmin -u root ping; do
+		sleep 2
+	done
+	# Switch to unix socket for auth
+	mysql --socket="$MYSQL_SOCKET" <<EOF
+FLUSH PRIVILEGES;
+ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;
+ALTER USER 'root'@'%' IDENTIFIED VIA unix_socket;
+FLUSH PRIVILEGES;
+EOF
+	echo "Running mysql_upgrade..."
+	mysql_upgrade -u root --protocol=SOCKET --socket=/run/mysqld/mysqld.sock
+	touch "$UPGRADE_MARKER"
+	echo "Shutting down MariaDB post upgrade..."
+	mysqladmin -u root shutdown
+else
+	echo "No upgrade needed or already completed."
+fi
+
+# Start MariaDB
+mariadbd --user=mysql --datadir="$MYSQL_DATADIR" &
 db_process=$!
 
 # FRONTEND AUDIT
@@ -171,7 +210,6 @@ frontend_process=$!
 backend_process=$!
 
 echo 'All processes initalized'
-
 
 # SIGTERM HANDLING
 trap _term SIGTERM
